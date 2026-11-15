@@ -17,7 +17,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, action, seeded: count })
     }
     if (action === 'clear') {
-      const removed = await db.expense.deleteMany({})
+      // Only remove sample data; expenses the user added are never touched.
+      const removed = await db.expense.deleteMany({ where: { isDemo: true } })
       return NextResponse.json({ ok: true, action, removed: removed.count })
     }
     return NextResponse.json({ error: 'Unknown action. Use "load" or "clear".' }, { status: 400 })

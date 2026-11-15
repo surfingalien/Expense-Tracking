@@ -81,7 +81,7 @@ export function ReportsView() {
       if (action === 'load') {
         toast.success(`Demo data loaded (${res.seeded ?? 0} expenses)`)
       } else {
-        toast.success(`Removed ${res.removed ?? 0} expenses`)
+        toast.success(`Removed ${res.removed ?? 0} demo expenses`)
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Operation failed')
@@ -218,25 +218,25 @@ export function ReportsView() {
             variant="outline"
             className="border-rose-200 text-rose-600 hover:bg-rose-50 hover:text-rose-700"
             onClick={() => setConfirmAction('clear')}
-            disabled={demoMutation.isPending}
+            disabled={demoMutation.isPending || !demoStatus?.demoExpenses}
           >
-            <Trash2 className="h-4 w-4" /> Clear all expenses
+            <Trash2 className="h-4 w-4" /> Clear demo data
           </Button>
         </div>
         <p className="mt-3 text-xs text-gray-400">
           Loading demo data replaces the sample expenses with a fresh 90-day dataset (categories and your own expenses
-          are kept). Clearing removes every expense but keeps your categories and budgets.
+          are kept). Clearing removes only the sample expenses; your own expenses, categories and budgets are kept.
         </p>
       </SectionCard>
 
       <AlertDialog open={!!confirmAction} onOpenChange={(o) => !o && setConfirmAction(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{confirmAction === 'load' ? 'Reload demo data?' : 'Clear all expenses?'}</AlertDialogTitle>
+            <AlertDialogTitle>{confirmAction === 'load' ? 'Reload demo data?' : 'Clear demo data?'}</AlertDialogTitle>
             <AlertDialogDescription>
               {confirmAction === 'load'
                 ? 'This replaces the current demo expenses with a fresh 90-day sample dataset. Your categories, budgets and manually added expenses are kept.'
-                : 'Every expense will be permanently removed. Categories and budgets are kept. This cannot be undone.'}
+                : 'All sample expenses will be removed. Your own expenses, categories and budgets are kept.'}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -248,7 +248,7 @@ export function ReportsView() {
                 void runDemoAction(confirmAction === 'load' ? 'load' : 'clear')
               }}
             >
-              {confirmAction === 'load' ? 'Load demo data' : 'Clear everything'}
+              {confirmAction === 'load' ? 'Load demo data' : 'Clear demo data'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
