@@ -2,7 +2,7 @@
 
 A modern expense-tracking web app with AI receipt scanning, automatic per-item categorization, budgets, an analytics dashboard, and PDF/CSV report export. Single-user, no login required.
 
-![stack](https://img.shields.io/badge/Next.js%2016-React%2019-10b981) ![db](https://img.shields.io/badge/Prisma-SQLite-2D3748) ![style](https://img.shields.io/badge/Tailwind%204-shadcn%2Fui-emerald)
+![stack](https://img.shields.io/badge/Next.js%2016-React%2019-10b981) ![db](https://img.shields.io/badge/Prisma-Postgres-2D3748) ![style](https://img.shields.io/badge/Tailwind%204-shadcn%2Fui-emerald)
 
 ## Features
 
@@ -19,7 +19,7 @@ A modern expense-tracking web app with AI receipt scanning, automatic per-item c
 | --------- | ----------------------------------------------------------- |
 | Framework | Next.js 16 (App Router) + TypeScript                        |
 | UI        | Tailwind CSS 4 + shadcn/ui + Recharts + lucide-react + sonner |
-| Data      | TanStack Query (client) + Prisma 6 / SQLite (server)        |
+| Data      | TanStack Query (client) + Prisma 6 / Postgres (server)      |
 | Reports   | pdf-lib (vector PDF) + native CSV                            |
 | Images    | sharp (client-size compression before OCR)                   |
 | AI        | z-ai-web-dev-sdk → GLM-4.6V vision model                     |
@@ -34,19 +34,19 @@ bun install        # or: npm install
 
 ### 2. Configure the database
 
-Create a `.env` file in the project root (one is included; adjust if you move things around):
+The app uses **Postgres** (Neon via the Vercel Marketplace in production). Set two variables in `.env`:
 
 ```
-DATABASE_URL=file:../db/custom.db
+DATABASE_URL=postgresql://...            # pooled connection (used by the app)
+DATABASE_URL_UNPOOLED=postgresql://...   # direct connection (used by migrations)
 ```
 
-> Prisma resolves this path relative to `prisma/schema.prisma`, so it points at `<project>/db/custom.db`.
+On Vercel, connecting a Neon database to the project sets both automatically; pull them locally with `vercel env pull .env`. For a local Postgres, both can be the same URL.
 
-Create the schema (a pre-seeded `db/custom.db` ships with the zip, so this step is optional if you kept it):
+Apply the schema:
 
 ```bash
-bun run db:generate   # prisma generate
-bun run db:push       # prisma db push --accept-data-loss
+bun run db:deploy     # prisma migrate deploy
 ```
 
 ### 3. Run the app
@@ -71,7 +71,7 @@ bun run build && bun run start
 
 ```
 prisma/schema.prisma            # Category + Expense models
-db/custom.db                    # SQLite database (pre-seeded demo data)
+prisma/migrations/              # Postgres migrations (applied on every build)
 src/lib/
   db.ts                         # Prisma client singleton
   seed.ts                       # deterministic 90-day demo data + ensureSeed()
