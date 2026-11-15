@@ -233,9 +233,8 @@ export async function ensureSeed(todayISO?: string): Promise<void> {
             data: { name: c.name, icon: c.icon, color: c.color, budget: c.budget, isDefault: true },
           })
         }
-      }
-      const expCount = await db.expense.count()
-      if (expCount === 0) {
+        // Demo expenses are seeded only on first-time setup, so clearing them
+        // sticks (instead of re-seeding whenever the expense table is empty).
         await seedDemoExpenses(todayISO)
       }
     })().catch((err) => {
