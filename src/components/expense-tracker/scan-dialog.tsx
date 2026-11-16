@@ -112,7 +112,7 @@ export function ScanDialog({
       setImage(dataUrl)
       setStep('scanning')
       const res = await scanMutation.mutateAsync(dataUrl)
-      const scan = res as ScanResult
+      const scan = res
       setResult(scan)
       setValue({
         amount: scan.total != null ? String(Math.round(scan.total * 100) / 100) : '',
@@ -142,7 +142,7 @@ export function ScanDialog({
       const items = result?.items?.length ? result.items : null
       const itemsJson = items ? JSON.stringify(items) : null
       await createMutation.mutateAsync(
-        toPayload(value, { items: itemsJson, receiptImage: result?.thumbnail ?? image, source: 'scan' }),
+        toPayload(value, { items: itemsJson, receiptImage: result?.receiptPath ?? null, source: 'scan' }),
       )
       toast.success(`Receipt saved — ${formatCurrency(Number(value.amount))}`)
       onOpenChange(false)

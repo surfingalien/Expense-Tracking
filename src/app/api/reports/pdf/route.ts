@@ -1,6 +1,6 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { db } from '@/lib/db'
-import { ensureSeed } from '@/lib/seed'
+import { db, fromCents } from '@/lib/db'
+import { jsonError, withUser } from '@/lib/api'
+import { monthBounds } from '@/lib/budget-status'
 import { buildExpenseReportPDF, type ReportData } from '@/lib/pdf-report'
 import { currentMonthKey, daysBetween, listBuckets, bucketKeyOf, shortDayLabel } from '@/lib/period'
 import type { BudgetProgress, CategorySlice, MonthlyRow, TrendBucket } from '@/lib/types'
@@ -12,8 +12,7 @@ function round2(n: number) {
   return Math.round(n * 100) / 100
 }
 
-export async function GET(req: NextRequest) {
-  try {
+export const GET = withUser('GET /api/reports/pdf', async (req, _ctx, { userId }) => {
     const sp = req.nextUrl.searchParams
     const start = sp.get('start') || ''
     const end = sp.get('end') || ''
@@ -21,25 +20,27 @@ export async function GET(req: NextRequest) {
     const monthParam = sp.get('month')
 
     if (!ISO_DATE.test(start) || !ISO_DATE.test(end)) {
-      return NextResponse.json({ error: 'start and end (YYYY-MM-DD) are required' }, { status: 400 })
+      return jsonError('start and end (YYYY-MM-DD) are required')
     }
 
-    const [expenses, categories] = await Promise.all([
+    const [expenses, categories, settings] = await Promise.all([
       db.expense.findMany({
-        where: { date: { gte: start, lte: end } },
+        where: { userId, date: { gte: start, lte: end } },
         include: { category: true },
         orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
       }),
-      db.category.findMany({ orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }] }),
+      db.category.findMany({ where: { userId }, orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }] }),
+      db.userSettings.findUnique({ where: { userId } }),
     ])
 
-    const total = round2(expenses.reduce((s, e) => s + e.amount, 0))
+    const totalCents = expenses.reduce((s, e) => s + e.amountCents, 0)
+    const total = fromCents(totalCents)
     const days = daysBetween(start, end)
 
     const catAgg = new Map<string, { total: number; count: number }>()
     for (const e of expenses) {
       const cur = catAgg.get(e.categoryId) || { total: 0, count: 0 }
-      cur.total += e.amount
+      cur.total += e.amountCents
       cur.count += 1
       catAgg.set(e.categoryId, cur)
     }
@@ -50,9 +51,9 @@ export async function GET(req: NextRequest) {
           id,
           name: c?.name || 'Unknown',
           color: c?.color || '#94a3b8',
-          total: round2(agg.total),
+          total: fromCents(agg.total),
           count: agg.count,
-          pct: total > 0 ? round2((agg.total / total) * 100) : 0,
+          pct: totalCents > 0 ? round2((agg.total / totalCents) * 100) : 0,
         }
       })
       .sort((a, b) => b.total - a.total)
@@ -64,9 +65,9 @@ export async function GET(req: NextRequest) {
     for (const b of buckets) byBucket.set(b.key, 0)
     for (const e of expenses) {
       const key = bucketKeyOf(e.date, granularity)
-      if (byBucket.has(key)) byBucket.set(key, (byBucket.get(key) || 0) + e.amount)
+      if (byBucket.has(key)) byBucket.set(key, (byBucket.get(key) || 0) + e.amountCents)
     }
-    for (const b of buckets) b.amount = round2(byBucket.get(b.key) || 0)
+    for (const b of buckets) b.amount = fromCents(byBucket.get(b.key) || 0)
     if (granularity === 'day' && buckets.length > 10) {
       for (const b of buckets) b.label = shortDayLabel(b.key)
     }
@@ -77,14 +78,18 @@ export async function GET(req: NextRequest) {
     const monthAgg = budgeted.length
       ? await db.expense.groupBy({
           by: ['categoryId'],
-          where: { date: { gte: `${budgetMonth}-01`, lte: `${budgetMonth}-31` }, categoryId: { in: budgeted.map((c) => c.id) } },
-          _sum: { amount: true },
+          where: {
+            userId,
+            date: { gte: monthBounds(budgetMonth).start, lte: monthBounds(budgetMonth).end },
+            categoryId: { in: budgeted.map((c) => c.id) },
+          },
+          _sum: { amountCents: true },
         })
       : []
-    const monthMap = new Map(monthAgg.map((m) => [m.categoryId, m._sum.amount || 0]))
+    const monthMap = new Map(monthAgg.map((m) => [m.categoryId, fromCents(m._sum.amountCents || 0)]))
     const budgets: BudgetProgress[] = budgeted
       .map((c) => {
-        const spent = round2(monthMap.get(c.id) || 0)
+        const spent = monthMap.get(c.id) || 0
         const pct = Math.round((spent / (c.budget || 1)) * 100)
         return {
           categoryId: c.id,
@@ -107,22 +112,22 @@ export async function GET(req: NextRequest) {
     const firstKey = `${anchor.getUTCFullYear()}-${String(anchor.getUTCMonth() + 1).padStart(2, '0')}`
     const dateRows = await db.expense.groupBy({
       by: ['date'],
-      where: { date: { gte: `${firstKey}-01`, lte: end } },
-      _sum: { amount: true },
+      where: { userId, date: { gte: `${firstKey}-01`, lte: end } },
+      _sum: { amountCents: true },
       _count: { _all: true },
     })
     const monthTotals = new Map<string, { total: number; count: number }>()
     for (const r of dateRows) {
       const key = r.date.slice(0, 7)
       const cur = monthTotals.get(key) || { total: 0, count: 0 }
-      cur.total += r._sum.amount || 0
+      cur.total += r._sum.amountCents || 0
       cur.count += r._count._all
       monthTotals.set(key, cur)
     }
     let cursorKey = firstKey
     for (let i = 0; i < 6; i++) {
       const cur = monthTotals.get(cursorKey)
-      monthly.push({ month: cursorKey, total: round2(cur?.total || 0), count: cur?.count || 0 })
+      monthly.push({ month: cursorKey, total: fromCents(cur?.total || 0), count: cur?.count || 0 })
       const [cy, cm] = cursorKey.split('-').map(Number)
       const nm = cm === 12 ? 1 : cm + 1
       const ny = cm === 12 ? cy + 1 : cy
@@ -131,6 +136,7 @@ export async function GET(req: NextRequest) {
 
     const data: ReportData = {
       periodLabel,
+      currency: settings?.currency || 'USD',
       start,
       end,
       total,
@@ -159,8 +165,4 @@ export async function GET(req: NextRequest) {
         'Cache-Control': 'no-store',
       },
     })
-  } catch (err) {
-    console.error('GET /api/reports/pdf failed:', err)
-    return NextResponse.json({ error: 'Failed to generate PDF report' }, { status: 500 })
-  }
-}
+})

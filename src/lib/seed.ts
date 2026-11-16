@@ -1,9 +1,10 @@
 // Seeds default categories on first run and generates a realistic demo
 // expense dataset (~90 days) so the dashboard is alive out of the box.
 
-import { db } from '@/lib/db'
+import { db, toCents } from '@/lib/db'
 import { DEFAULT_CATEGORIES } from '@/lib/categories'
 import { toISODate } from '@/lib/period'
+import { materializeRecurring } from '@/lib/recurring'
 
 // Deterministic PRNG so demo data is stable between runs.
 function mulberry32(seed: number) {
@@ -127,15 +128,16 @@ const SUBSCRIPTIONS: SubscriptionSpec[] = [
   { dayOfMonth: 16, merchant: 'Water Utility', amount: 0, category: 'Bills & Utilities', desc: 'Monthly utility' },
 ]
 
-export async function seedDemoExpenses(todayISO?: string): Promise<number> {
+export async function seedDemoExpenses(userId: string, todayISO?: string): Promise<number> {
   const todayStr = todayISO || toISODate(new Date())
-  const categories = await db.category.findMany()
+  const categories = await db.category.findMany({ where: { userId } })
   if (categories.length === 0) return 0
   const byName = new Map(categories.map((c) => [c.name, c.id]))
 
   const days = 90
   const rows: {
-    amount: number
+    userId: string
+    amountCents: number
     merchant: string
     date: string
     description: string | null
@@ -161,7 +163,8 @@ export async function seedDemoExpenses(todayISO?: string): Promise<number> {
       const categoryId = byName.get(sub.category)
       if (!categoryId) continue
       rows.push({
-        amount: amt,
+        userId,
+        amountCents: toCents(amt),
         merchant: sub.merchant,
         date: dateISO,
         description: sub.desc,
@@ -181,7 +184,8 @@ export async function seedDemoExpenses(todayISO?: string): Promise<number> {
       const reps = categoryName === 'Food & Dining' && rand() < 0.28 ? 2 : 1
       for (let r = 0; r < reps; r++) {
         rows.push({
-          amount: amountBetween(spec.min, spec.max),
+          userId,
+          amountCents: toCents(amountBetween(spec.min, spec.max)),
           merchant: spec.name,
           date: dateISO,
           description: spec.desc ?? null,
@@ -205,7 +209,8 @@ export async function seedDemoExpenses(todayISO?: string): Promise<number> {
     const spec = pick(RANDOM_MERCHANTS['Travel'])
     if (!categoryId || !spec) continue
     rows.push({
-      amount: amountBetween(spec.min, spec.max),
+      userId,
+      amountCents: toCents(amountBetween(spec.min, spec.max)),
       merchant: spec.name,
       date: dateISO,
       description: 'Trip',
@@ -220,27 +225,54 @@ export async function seedDemoExpenses(todayISO?: string): Promise<number> {
   return result.count
 }
 
-let seedPromise: Promise<void> | null = null
+const setupPromises = new Map<string, Promise<void>>()
 
-/** Idempotent: creates default categories + demo expenses the first time. */
-export async function ensureSeed(todayISO?: string): Promise<void> {
-  if (!seedPromise) {
-    seedPromise = (async () => {
-      const catCount = await db.category.count()
-      if (catCount === 0) {
-        for (const c of DEFAULT_CATEGORIES) {
-          await db.category.create({
-            data: { name: c.name, icon: c.icon, color: c.color, budget: c.budget, isDefault: true },
-          })
-        }
-        // Demo expenses are seeded only on first-time setup, so clearing them
-        // sticks (instead of re-seeding whenever the expense table is empty).
-        await seedDemoExpenses(todayISO)
-      }
-    })().catch((err) => {
-      seedPromise = null
+async function setupUser(userId: string, todayISO: string): Promise<void> {
+  const existing = await db.userSettings.findUnique({ where: { userId } })
+  if (existing) return
+
+  // The very first user to sign in inherits data created before sign-in
+  // existed (rows with no owner), so nothing already in the database is lost.
+  const anyUser = await db.userSettings.count()
+  await db.userSettings.create({ data: { userId } })
+  if (anyUser === 0) {
+    await db.category.updateMany({ where: { userId: null }, data: { userId } })
+    await db.expense.updateMany({ where: { userId: null }, data: { userId } })
+  }
+
+  const catCount = await db.category.count({ where: { userId } })
+  if (catCount === 0) {
+    await db.category.createMany({
+      data: DEFAULT_CATEGORIES.map((c) => ({
+        userId,
+        name: c.name,
+        icon: c.icon,
+        color: c.color,
+        budgetCents: c.budget == null ? null : toCents(c.budget),
+        isDefault: true,
+      })),
+    })
+    // Demo expenses are seeded only on first-time setup, so clearing them
+    // sticks (instead of re-seeding whenever the expense table is empty).
+    await seedDemoExpenses(userId, todayISO)
+  }
+}
+
+/**
+ * Idempotent per-user bootstrap: creates settings, default categories and
+ * demo data the first time a user is seen, then materializes any recurring
+ * expenses that have come due.
+ */
+export async function ensureUserSetup(userId: string, todayISO?: string): Promise<void> {
+  const today = todayISO && /^\d{4}-\d{2}-\d{2}$/.test(todayISO) ? todayISO : toISODate(new Date())
+  let p = setupPromises.get(userId)
+  if (!p) {
+    p = setupUser(userId, today).catch((err) => {
+      setupPromises.delete(userId)
       throw err
     })
+    setupPromises.set(userId, p)
   }
-  return seedPromise
+  await p
+  await materializeRecurring(userId, today)
 }

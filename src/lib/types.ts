@@ -31,6 +31,7 @@ export interface ExpenseDTO {
   source: string // manual | scan | demo
   isDemo: boolean
   categoryId: string
+  recurringId: string | null
   category: CategoryInfo
   createdAt: string
 }
@@ -38,6 +39,8 @@ export interface ExpenseDTO {
 export interface ExpensesResponse {
   expenses: ExpenseDTO[]
   summary: { count: number; total: number }
+  hasMore: boolean
+  nextOffset: number
 }
 
 export interface BudgetStatus {
@@ -61,7 +64,8 @@ export interface ScanResult {
   categoryId: string
   categoryName: string
   confidence: 'high' | 'medium' | 'low'
-  thumbnail: string | null
+  thumbnail: string | null // small preview for the dialog (not stored)
+  receiptPath: string | null // private Blob pathname to attach to the expense
 }
 
 export interface TrendBucket {
@@ -111,6 +115,8 @@ export interface AnalyticsResponse {
     days: number
     prevTotal: number
     deltaPct: number | null
+    income: number
+    net: number // income - spending
     topCategory: { name: string; color: string; total: number } | null
   }
   trend: TrendBucket[]
@@ -132,4 +138,38 @@ export interface DemoStatus {
   expenses: number
   categories: number
   demoExpenses: number
+}
+
+export interface UserSettingsDTO {
+  currency: string
+}
+
+export interface IncomeDTO {
+  id: string
+  amount: number
+  source: string
+  date: string
+  description: string | null
+  createdAt: string
+}
+
+export type RecurringFrequency = 'weekly' | 'monthly' | 'yearly'
+
+export interface RecurringDTO {
+  id: string
+  amount: number
+  merchant: string
+  description: string | null
+  categoryId: string
+  category: CategoryInfo
+  frequency: RecurringFrequency
+  startDate: string
+  nextDate: string
+  active: boolean
+}
+
+export interface ImportRowResult {
+  imported: number
+  skipped: number
+  errors: string[]
 }

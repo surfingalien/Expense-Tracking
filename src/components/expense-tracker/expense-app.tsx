@@ -2,6 +2,7 @@
 
 import { useMemo, useState, useSyncExternalStore } from 'react'
 import {
+  Banknote,
   FileBarChart,
   LayoutDashboard,
   PieChart,
@@ -16,16 +17,20 @@ import { DashboardView } from './dashboard-view'
 import { ExpensesView } from './expenses-view'
 import { BudgetsView } from './budgets-view'
 import { ReportsView } from './reports-view'
-import { useAnalytics } from './hooks'
-import { formatCurrency } from '@/lib/format'
+import { IncomeView } from './income-view'
+import { AccountButton } from './account-button'
+import { BudgetAlerts } from './budget-alerts'
+import { useAnalytics, useSettings } from './hooks'
+import { formatCurrency, setActiveCurrency } from '@/lib/format'
 import { formatMonthKey, toISODate } from '@/lib/period'
 import type { ExpenseDTO } from '@/lib/types'
 
-type View = 'dashboard' | 'expenses' | 'budgets' | 'reports'
+type View = 'dashboard' | 'expenses' | 'income' | 'budgets' | 'reports'
 
 const NAV: { key: View; label: string; icon: typeof LayoutDashboard }[] = [
   { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { key: 'expenses', label: 'Expenses', icon: ReceiptText },
+  { key: 'income', label: 'Income', icon: Banknote },
   { key: 'budgets', label: 'Budgets', icon: PieChart },
   { key: 'reports', label: 'Reports', icon: FileBarChart },
 ]
@@ -33,8 +38,9 @@ const NAV: { key: View; label: string; icon: typeof LayoutDashboard }[] = [
 const VIEW_META: Record<View, { title: string; subtitle: string }> = {
   dashboard: { title: 'Dashboard', subtitle: 'Your spending at a glance' },
   expenses: { title: 'Expenses', subtitle: 'Browse, search and manage every expense' },
-  budgets: { title: 'Budgets', subtitle: 'Monthly limits per category' },
-  reports: { title: 'Reports', subtitle: 'Generate PDF & CSV reports, manage data' },
+  income: { title: 'Income', subtitle: 'Money in, and what you saved' },
+  budgets: { title: 'Budgets', subtitle: 'Monthly limits and recurring expenses' },
+  reports: { title: 'Reports', subtitle: 'Reports, import, settings and data' },
 }
 
 function AppSkeleton() {
@@ -71,6 +77,11 @@ export function ExpenseApp() {
   }>({ open: false, mode: 'add', expense: null })
   const [scanOpen, setScanOpen] = useState(false)
 
+  const { data: settings } = useSettings()
+  const currency = settings?.currency ?? 'USD'
+  // Formatting helpers read the active currency; set it before rendering.
+  setActiveCurrency(currency)
+
   const { data: monthAnalytics } = useAnalytics('month')
   const monthTotal = monthAnalytics?.summary.total ?? 0
   const monthCount = monthAnalytics?.summary.count ?? 0
@@ -82,7 +93,7 @@ export function ExpenseApp() {
   const meta = VIEW_META[view]
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#f6f7f6] text-gray-900">
+    <div key={currency} className="flex min-h-screen flex-col bg-[#f6f7f6] text-gray-900">
       <div className="flex flex-1">
         {/* Desktop sidebar */}
         <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col border-r border-gray-100 bg-white lg:flex">
@@ -151,13 +162,20 @@ export function ExpenseApp() {
                   <Plus className="h-4 w-4" />
                   <span className="hidden sm:inline">Add expense</span>
                 </button>
+                <AccountButton />
               </div>
             </div>
           </header>
 
           <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-5 sm:px-6 lg:px-8 lg:py-7">
-            {view === 'dashboard' && <DashboardView onGoToExpenses={() => setView('expenses')} />}
+            {view === 'dashboard' && (
+              <>
+                <BudgetAlerts onOpenBudgets={() => setView('budgets')} />
+                <DashboardView onGoToExpenses={() => setView('expenses')} />
+              </>
+            )}
             {view === 'expenses' && <ExpensesView onEdit={openEdit} onAdd={openAdd} />}
+            {view === 'income' && <IncomeView />}
             {view === 'budgets' && <BudgetsView />}
             {view === 'reports' && <ReportsView />}
           </main>
@@ -165,7 +183,7 @@ export function ExpenseApp() {
           <footer className="mt-auto hidden border-t border-gray-100 bg-white px-6 py-4 lg:block">
             <div className="mx-auto flex max-w-7xl items-center justify-between text-xs text-gray-400">
               <span>Expense Tracker — scan receipts, track spending, stay on budget.</span>
-              <span>{toISODate(new Date())} · USD</span>
+              <span>{toISODate(new Date())} · {currency}</span>
             </div>
           </footer>
         </div>
@@ -177,7 +195,7 @@ export function ExpenseApp() {
         aria-label="Mobile navigation"
         style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
       >
-        <div className="grid grid-cols-4">
+        <div className="grid grid-cols-5">
           {NAV.map((item) => {
             const Icon = item.icon
             const active = view === item.key

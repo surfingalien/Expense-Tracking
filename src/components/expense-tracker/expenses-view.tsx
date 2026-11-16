@@ -25,7 +25,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
-import { useCategories, useDeleteExpense, useExpenses } from './hooks'
+import { useCategories, useDeleteExpense, useInfiniteExpenses } from './hooks'
 import { SectionCard } from './ui-bits'
 import { CategoryIcon } from './category-icon'
 import { formatCurrency } from '@/lib/format'
@@ -153,7 +153,9 @@ export function ExpensesView({
     return { start, end, categoryId, q: debouncedQ || undefined, sort }
   }, [period, categoryId, debouncedQ, sort])
 
-  const { data, isLoading, isError, error, refetch, isFetching } = useExpenses(filters)
+  const { data, isLoading, isError, error, refetch, isFetching, hasNextPage, fetchNextPage, isFetchingNextPage } =
+    useInfiniteExpenses(filters)
+  const expenses = useMemo(() => data?.pages.flatMap((p) => p.expenses) ?? [], [data])
   const deleteMutation = useDeleteExpense()
 
   useEffect(() => {
@@ -173,7 +175,7 @@ export function ExpensesView({
     }
   }
 
-  const summary = data?.summary
+  const summary = data?.pages[0]?.summary
 
   return (
     <SectionCard
@@ -245,7 +247,7 @@ export function ExpensesView({
           <p className="text-gray-500">
             <span className="font-semibold text-gray-900">{summary?.count ?? 0}</span> expenses ·{' '}
             <span className="font-semibold text-gray-900">{formatCurrency(summary?.total ?? 0)}</span> total
-            {isFetching && <span className="ml-2 text-xs text-gray-400">updating…</span>}
+            {isFetching && !isFetchingNextPage && <span className="ml-2 text-xs text-gray-400">updating…</span>}
           </p>
         )}
       </div>
@@ -265,7 +267,7 @@ export function ExpensesView({
             <Skeleton key={i} className="h-12 w-full rounded-lg" />
           ))}
         </div>
-      ) : (data?.expenses.length ?? 0) === 0 ? (
+      ) : expenses.length === 0 ? (
         <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-gray-200 py-12 text-center">
           <Wallet className="h-10 w-10 text-gray-300" />
           <p className="text-sm font-medium text-gray-600">No expenses match these filters</p>
@@ -286,10 +288,17 @@ export function ExpensesView({
             ))}
           </div>
           <div className="divide-y divide-gray-50 md:divide-y-0">
-            {data?.expenses.map((e) => (
+            {expenses.map((e) => (
               <ExpenseRow key={e.id} expense={e} today={toISODate(new Date())} onEdit={onEdit} onDelete={setPendingDelete} />
             ))}
           </div>
+          {hasNextPage && (
+            <div className="flex justify-center pt-3">
+              <Button variant="outline" size="sm" onClick={() => void fetchNextPage()} disabled={isFetchingNextPage}>
+                {isFetchingNextPage ? 'Loading…' : `Load more (${(summary?.count ?? 0) - expenses.length} remaining)`}
+              </Button>
+            </div>
+          )}
         </div>
       )}
 

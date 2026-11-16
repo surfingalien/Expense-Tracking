@@ -1,6 +1,8 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { db } from '@/lib/db'
-import { ensureSeed } from '@/lib/seed'
+import { NextResponse } from 'next/server'
+import { db, fromCents } from '@/lib/db'
+import { jsonError, withUser } from '@/lib/api'
+import { monthBounds } from '@/lib/budget-status'
+import { toExpenseDTO } from '@/lib/dto'
 import { bucketKeyOf, currentMonthKey, daysBetween, listBuckets, shortDayLabel } from '@/lib/period'
 import type { AnalyticsResponse, CategorySlice, MerchantStat, TrendBucket } from '@/lib/types'
 
@@ -11,11 +13,9 @@ function round2(n: number) {
   return Math.round(n * 100) / 100
 }
 
-export async function GET(req: NextRequest) {
-  try {
+// All sums are done in integer cents and converted once at the end.
+export const GET = withUser('GET /api/analytics', async (req, _ctx, { userId }) => {
     const sp = req.nextUrl.searchParams
-    const today = sp.get('today') || undefined
-    await ensureSeed(today)
 
     const start = sp.get('start') || ''
     const end = sp.get('end') || ''
@@ -27,28 +27,30 @@ export async function GET(req: NextRequest) {
     const monthlyCount = Math.min(Math.max(Number(sp.get('monthly')) || 0, 0), 24)
 
     if (!ISO_DATE.test(start) || !ISO_DATE.test(end)) {
-      return NextResponse.json({ error: 'start and end (YYYY-MM-DD) are required' }, { status: 400 })
+      return jsonError('start and end (YYYY-MM-DD) are required')
     }
 
-    const [expenses, categories] = await Promise.all([
+    const [expenses, categories, incomeAgg] = await Promise.all([
       db.expense.findMany({
-        where: { date: { gte: start, lte: end } },
-        include: { category: true },
-        orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
+        where: { userId, date: { gte: start, lte: end } },
+        select: { amountCents: true, categoryId: true, merchant: true, date: true },
       }),
-      db.category.findMany({ orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }] }),
+      db.category.findMany({ where: { userId }, orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }] }),
+      db.income.aggregate({ where: { userId, date: { gte: start, lte: end } }, _sum: { amountCents: true } }),
     ])
 
     // ---- summary ----
-    const total = round2(expenses.reduce((s, e) => s + e.amount, 0))
+    const totalCents = expenses.reduce((s, e) => s + e.amountCents, 0)
+    const total = fromCents(totalCents)
+    const income = fromCents(incomeAgg._sum.amountCents || 0)
     const days = daysBetween(start, end)
     let prevTotal = 0
     if (ISO_DATE.test(prevStart) && ISO_DATE.test(prevEnd)) {
       const prevAgg = await db.expense.aggregate({
-        _sum: { amount: true },
-        where: { date: { gte: prevStart, lte: prevEnd } },
+        _sum: { amountCents: true },
+        where: { userId, date: { gte: prevStart, lte: prevEnd } },
       })
-      prevTotal = round2(prevAgg._sum.amount || 0)
+      prevTotal = fromCents(prevAgg._sum.amountCents || 0)
     }
     const deltaPct = prevTotal > 0 ? round2(((total - prevTotal) / prevTotal) * 100) : null
 
@@ -58,9 +60,9 @@ export async function GET(req: NextRequest) {
     for (const b of buckets) byBucket.set(b.key, 0)
     for (const e of expenses) {
       const key = bucketKeyOf(e.date, granularity)
-      if (byBucket.has(key)) byBucket.set(key, (byBucket.get(key) || 0) + e.amount)
+      if (byBucket.has(key)) byBucket.set(key, (byBucket.get(key) || 0) + e.amountCents)
     }
-    for (const b of buckets) b.amount = round2(byBucket.get(b.key) || 0)
+    for (const b of buckets) b.amount = fromCents(byBucket.get(b.key) || 0)
     // dense daily series read better with date labels than repeated weekdays
     if (granularity === 'day' && buckets.length > 10) {
       for (const b of buckets) b.label = shortDayLabel(b.key)
@@ -70,7 +72,7 @@ export async function GET(req: NextRequest) {
     const catAgg = new Map<string, { total: number; count: number }>()
     for (const e of expenses) {
       const cur = catAgg.get(e.categoryId) || { total: 0, count: 0 }
-      cur.total += e.amount
+      cur.total += e.amountCents
       cur.count += 1
       catAgg.set(e.categoryId, cur)
     }
@@ -81,9 +83,9 @@ export async function GET(req: NextRequest) {
           id,
           name: c?.name || 'Unknown',
           color: c?.color || '#94a3b8',
-          total: round2(agg.total),
+          total: fromCents(agg.total),
           count: agg.count,
-          pct: total > 0 ? round2((agg.total / total) * 100) : 0,
+          pct: totalCents > 0 ? round2((agg.total / totalCents) * 100) : 0,
         }
       })
       .sort((a, b) => b.total - a.total)
@@ -94,33 +96,30 @@ export async function GET(req: NextRequest) {
     for (const e of expenses) {
       const key = e.merchant.trim().toLowerCase()
       const cur = merchAgg.get(key) || { total: 0, count: 0, display: e.merchant.trim() }
-      cur.total += e.amount
+      cur.total += e.amountCents
       cur.count += 1
       merchAgg.set(key, cur)
     }
     const merchants: MerchantStat[] = [...merchAgg.entries()]
-      .map(([, v]) => ({ name: v.display, total: round2(v.total), count: v.count, pct: total > 0 ? round2((v.total / total) * 100) : 0 }))
+      .map(([, v]) => ({ name: v.display, total: fromCents(v.total), count: v.count, pct: totalCents > 0 ? round2((v.total / totalCents) * 100) : 0 }))
       .sort((a, b) => b.total - a.total)
       .slice(0, 6)
 
     // ---- budgets (for the requested month) ----
     const budgetMonth = month || currentMonthKey(end)
-    const bStart = `${budgetMonth}-01`
-    const [by, bm] = budgetMonth.split('-').map(Number)
-    const lastDay = new Date(Date.UTC(by, bm, 0)).getUTCDate()
-    const bEnd = `${budgetMonth}-${String(lastDay).padStart(2, '0')}`
+    const { start: bStart, end: bEnd } = monthBounds(budgetMonth)
     const budgeted = categories.filter((c) => c.budget != null && c.budget > 0)
     const monthAgg = budgeted.length
       ? await db.expense.groupBy({
           by: ['categoryId'],
-          where: { date: { gte: bStart, lte: bEnd }, categoryId: { in: budgeted.map((c) => c.id) } },
-          _sum: { amount: true },
+          where: { userId, date: { gte: bStart, lte: bEnd }, categoryId: { in: budgeted.map((c) => c.id) } },
+          _sum: { amountCents: true },
         })
       : []
-    const monthMap = new Map(monthAgg.map((m) => [m.categoryId, m._sum.amount || 0]))
+    const monthMap = new Map(monthAgg.map((m) => [m.categoryId, fromCents(m._sum.amountCents || 0)]))
     const budgets = budgeted
       .map((c) => {
-        const spent = round2(monthMap.get(c.id) || 0)
+        const spent = monthMap.get(c.id) || 0
         const pct = Math.round((spent / (c.budget || 1)) * 100)
         return {
           categoryId: c.id,
@@ -137,11 +136,12 @@ export async function GET(req: NextRequest) {
 
     // ---- recent ----
     const recentRows = await db.expense.findMany({
+      where: { userId },
       include: { category: true },
       orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
       take: 8,
     })
-    const recent = recentRows.map((e) => ({ ...e, createdAt: e.createdAt.toISOString() }))
+    const recent = recentRows.map(toExpenseDTO)
 
     // ---- monthly summary (optional) ----
     let monthly: AnalyticsResponse['monthly'] | undefined
@@ -153,15 +153,15 @@ export async function GET(req: NextRequest) {
       const startOfMonthStr = `${firstKey}-01`
       const rows = await db.expense.groupBy({
         by: ['date'],
-        where: { date: { gte: startOfMonthStr, lte: end } },
-        _sum: { amount: true },
+        where: { userId, date: { gte: startOfMonthStr, lte: end } },
+        _sum: { amountCents: true },
         _count: { _all: true },
       })
       const monthTotals = new Map<string, { total: number; count: number }>()
       for (const r of rows) {
         const key = r.date.slice(0, 7)
         const cur = monthTotals.get(key) || { total: 0, count: 0 }
-        cur.total += r._sum.amount || 0
+        cur.total += r._sum.amountCents || 0
         cur.count += r._count._all
         monthTotals.set(key, cur)
       }
@@ -169,7 +169,7 @@ export async function GET(req: NextRequest) {
       let cursorKey = firstKey
       for (let i = 0; i < monthlyCount; i++) {
         const cur = monthTotals.get(cursorKey)
-        monthly.push({ month: cursorKey, total: round2(cur?.total || 0), count: cur?.count || 0 })
+        monthly.push({ month: cursorKey, total: fromCents(cur?.total || 0), count: cur?.count || 0 })
         const [cy, cm] = cursorKey.split('-').map(Number)
         const nm = cm === 12 ? 1 : cm + 1
         const ny = cm === 12 ? cy + 1 : cy
@@ -185,6 +185,8 @@ export async function GET(req: NextRequest) {
         days,
         prevTotal,
         deltaPct,
+        income,
+        net: round2(income - total),
         topCategory: topCat ? { name: topCat.name, color: topCat.color, total: topCat.total } : null,
       },
       trend: buckets,
@@ -195,8 +197,4 @@ export async function GET(req: NextRequest) {
       monthly,
     }
     return NextResponse.json(response)
-  } catch (err) {
-    console.error('GET /api/analytics failed:', err)
-    return NextResponse.json({ error: 'Failed to compute analytics' }, { status: 500 })
-  }
-}
+})

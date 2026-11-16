@@ -68,7 +68,7 @@ export function TrendChart({ buckets, loading }: { buckets: TrendBucket[]; loadi
               interval={tickInterval}
             />
             <YAxis
-              tickFormatter={formatCompact}
+              tickFormatter={(v) => formatCompact(Number(v))}
               tick={{ fontSize: 11, fill: '#6b7280' }}
               axisLine={false}
               tickLine={false}
@@ -94,7 +94,7 @@ export function TrendChart({ buckets, loading }: { buckets: TrendBucket[]; loadi
               interval={tickInterval}
             />
             <YAxis
-              tickFormatter={formatCompact}
+              tickFormatter={(v) => formatCompact(Number(v))}
               tick={{ fontSize: 11, fill: '#6b7280' }}
               axisLine={false}
               tickLine={false}
@@ -202,7 +202,7 @@ export function BudgetBars({ budgets, loading }: { budgets: BudgetProgress[]; lo
           <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#eef0ef" />
           <XAxis
             type="number"
-            tickFormatter={formatCompact}
+            tickFormatter={(v) => formatCompact(Number(v))}
             tick={{ fontSize: 11, fill: '#6b7280' }}
             axisLine={false}
             tickLine={false}

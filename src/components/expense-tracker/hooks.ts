@@ -1,6 +1,6 @@
 'use client'
 
-import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import {
   currentMonthKey,
@@ -18,7 +18,13 @@ import type {
   DemoStatus,
   ExpenseMutationResponse,
   ExpensesResponse,
+  ImportRowResult,
+  IncomeDTO,
   MonthSummary,
+  RecurringDTO,
+  RecurringFrequency,
+  ScanResult,
+  UserSettingsDTO,
 } from '@/lib/types'
 
 export async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
@@ -45,20 +51,34 @@ export interface ExpenseFilters {
   limit?: number
 }
 
+function expenseParams(filters: ExpenseFilters, offset = 0) {
+  const params = new URLSearchParams({ today: toISODate(new Date()) })
+  if (filters.start) params.set('start', filters.start)
+  if (filters.end) params.set('end', filters.end)
+  if (filters.categoryId && filters.categoryId !== 'all') params.set('categoryId', filters.categoryId)
+  if (filters.q) params.set('q', filters.q)
+  if (filters.sort) params.set('sort', filters.sort)
+  if (filters.limit) params.set('limit', String(filters.limit))
+  if (offset) params.set('offset', String(offset))
+  return params
+}
+
 export function useExpenses(filters: ExpenseFilters, enabled = true) {
   return useQuery({
     queryKey: ['expenses', filters],
-    queryFn: async () => {
-      const params = new URLSearchParams({ today: toISODate(new Date()) })
-      if (filters.start) params.set('start', filters.start)
-      if (filters.end) params.set('end', filters.end)
-      if (filters.categoryId && filters.categoryId !== 'all') params.set('categoryId', filters.categoryId)
-      if (filters.q) params.set('q', filters.q)
-      if (filters.sort) params.set('sort', filters.sort)
-      if (filters.limit) params.set('limit', String(filters.limit))
-      return fetchJSON<ExpensesResponse>(`/api/expenses?${params.toString()}`)
-    },
+    queryFn: () => fetchJSON<ExpensesResponse>(`/api/expenses?${expenseParams(filters)}`),
     enabled,
+  })
+}
+
+/** Paginated expense list: loads 50 rows at a time ("Load more"). */
+export function useInfiniteExpenses(filters: ExpenseFilters) {
+  return useInfiniteQuery({
+    queryKey: ['expenses', 'infinite', filters],
+    initialPageParam: 0,
+    queryFn: ({ pageParam }) =>
+      fetchJSON<ExpensesResponse>(`/api/expenses?${expenseParams({ ...filters, limit: 50 }, pageParam)}`),
+    getNextPageParam: (last) => (last.hasMore ? last.nextOffset : undefined),
   })
 }
 
@@ -114,12 +134,14 @@ export function useDemoStatus() {
   })
 }
 
-function invalidateAll(qc: QueryClient) {
+export function invalidateAll(qc: QueryClient) {
   void qc.invalidateQueries({ queryKey: ['expenses'] })
   void qc.invalidateQueries({ queryKey: ['analytics'] })
   void qc.invalidateQueries({ queryKey: ['categories'] })
   void qc.invalidateQueries({ queryKey: ['monthly'] })
   void qc.invalidateQueries({ queryKey: ['demo-status'] })
+  void qc.invalidateQueries({ queryKey: ['income'] })
+  void qc.invalidateQueries({ queryKey: ['recurring'] })
 }
 
 export function notifyBudgetStatus(status: BudgetStatus | null | undefined) {
@@ -244,10 +266,126 @@ export function useDemoMutation() {
 export function useScanReceipt() {
   return useMutation({
     mutationFn: (image: string) =>
-      fetchJSON('/api/scan', {
+      fetchJSON<ScanResult>('/api/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image }),
+        body: JSON.stringify({ image, today: toISODate(new Date()) }),
       }),
+  })
+}
+
+function jsonInit(method: string, body: unknown): RequestInit {
+  return { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+}
+
+// ---- settings ----
+export function useSettings() {
+  return useQuery({
+    queryKey: ['settings'],
+    queryFn: () => fetchJSON<UserSettingsDTO>(`/api/settings?today=${toISODate(new Date())}`),
+    staleTime: Infinity,
+  })
+}
+
+export function useUpdateSettings() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: UserSettingsDTO) => fetchJSON<UserSettingsDTO>('/api/settings', jsonInit('PUT', payload)),
+    onSuccess: (data) => qc.setQueryData(['settings'], data),
+  })
+}
+
+// ---- income ----
+export interface IncomePayload {
+  amount: number
+  source: string
+  date: string
+  description?: string | null
+}
+
+export function useIncome(start: string, end: string) {
+  return useQuery({
+    queryKey: ['income', start, end],
+    queryFn: () => fetchJSON<{ income: IncomeDTO[]; total: number }>(`/api/income?start=${start}&end=${end}`),
+  })
+}
+
+export function useCreateIncome() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: IncomePayload) => fetchJSON<{ income: IncomeDTO }>('/api/income', jsonInit('POST', payload)),
+    onSuccess: () => invalidateAll(qc),
+  })
+}
+
+export function useDeleteIncome() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => fetchJSON<{ ok: boolean }>(`/api/income/${id}`, { method: 'DELETE' }),
+    onSuccess: () => invalidateAll(qc),
+  })
+}
+
+// ---- recurring expenses ----
+export interface RecurringPayload {
+  amount: number
+  merchant: string
+  categoryId: string
+  frequency: RecurringFrequency
+  startDate: string
+  description?: string | null
+  active?: boolean
+}
+
+export function useRecurring() {
+  return useQuery({
+    queryKey: ['recurring'],
+    queryFn: () => fetchJSON<{ recurring: RecurringDTO[] }>(`/api/recurring?today=${toISODate(new Date())}`),
+  })
+}
+
+export function useCreateRecurring() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: RecurringPayload) =>
+      fetchJSON<{ recurring: RecurringDTO; created: number }>(
+        '/api/recurring',
+        jsonInit('POST', { ...payload, today: toISODate(new Date()) }),
+      ),
+    onSuccess: () => invalidateAll(qc),
+  })
+}
+
+export function useUpdateRecurring() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, payload }: { id: string; payload: Partial<RecurringPayload> }) =>
+      fetchJSON<{ recurring: RecurringDTO }>(`/api/recurring/${id}`, jsonInit('PUT', payload)),
+    onSuccess: () => invalidateAll(qc),
+  })
+}
+
+export function useDeleteRecurring() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => fetchJSON<{ ok: boolean }>(`/api/recurring/${id}`, { method: 'DELETE' }),
+    onSuccess: () => invalidateAll(qc),
+  })
+}
+
+// ---- CSV import ----
+export interface ImportRow {
+  date: string
+  merchant: string
+  amount: number
+  category?: string | null
+  description?: string | null
+}
+
+export function useImportExpenses() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (rows: ImportRow[]) => fetchJSON<ImportRowResult>('/api/import', jsonInit('POST', { rows })),
+    onSuccess: () => invalidateAll(qc),
   })
 }

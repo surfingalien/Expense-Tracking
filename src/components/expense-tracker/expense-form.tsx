@@ -4,7 +4,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { CategoryIcon } from './category-icon'
-import { formatCurrency } from '@/lib/format'
+import { currencySymbol, formatCurrency } from '@/lib/format'
 import type { CategoryInfo, ExpenseItem } from '@/lib/types'
 
 export interface ExpenseFormValue {
@@ -66,9 +66,7 @@ export function ExpenseFormFields({
           Amount <span className="text-rose-500">*</span>
         </Label>
         <div className="relative">
-          <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold text-gray-400">
-            $
-          </span>
+          <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold text-gray-400">{currencySymbol()}</span>
           <Input
             id="exp-amount"
             type="number"
@@ -76,7 +74,7 @@ export function ExpenseFormFields({
             step="0.01"
             inputMode="decimal"
             placeholder="0.00"
-            className="pl-7 text-base font-semibold"
+            className={`${currencySymbol().length > 1 ? 'pl-11' : 'pl-7'} text-base font-semibold`}
             value={value.amount}
             disabled={disabled}
             onChange={(e) => set({ amount: e.target.value })}
