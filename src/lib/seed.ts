@@ -128,9 +128,12 @@ const SUBSCRIPTIONS: SubscriptionSpec[] = [
   { dayOfMonth: 16, merchant: 'Water Utility', amount: 0, category: 'Bills & Utilities', desc: 'Monthly utility' },
 ]
 
-export async function seedDemoExpenses(userId: string, todayISO?: string): Promise<number> {
+/** Prisma client or an interactive-transaction client. */
+type DbClient = Pick<typeof db, 'category' | 'expense' | 'userSettings'>
+
+export async function seedDemoExpenses(userId: string, todayISO?: string, client: DbClient = db): Promise<number> {
   const todayStr = todayISO || toISODate(new Date())
-  const categories = await db.category.findMany({ where: { userId } })
+  const categories = await client.category.findMany({ where: { userId } })
   if (categories.length === 0) return 0
   const byName = new Map(categories.map((c) => [c.name, c.id]))
 
@@ -221,41 +224,56 @@ export async function seedDemoExpenses(userId: string, todayISO?: string): Promi
   }
 
   if (rows.length === 0) return 0
-  const result = await db.expense.createMany({ data: rows })
+  const result = await client.expense.createMany({ data: rows })
   return result.count
 }
 
 const setupPromises = new Map<string, Promise<void>>()
 
+// Arbitrary constant key for the Postgres advisory lock that serializes
+// first-time user setup across concurrent requests / function instances.
+const SETUP_LOCK_KEY = 74_210_301
+
 async function setupUser(userId: string, todayISO: string): Promise<void> {
-  const existing = await db.userSettings.findUnique({ where: { userId } })
-  if (existing) return
+  // Fast path: already set up (no lock needed).
+  if (await db.userSettings.findUnique({ where: { userId } })) return
 
-  // The very first user to sign in inherits data created before sign-in
-  // existed (rows with no owner), so nothing already in the database is lost.
-  const anyUser = await db.userSettings.count()
-  await db.userSettings.create({ data: { userId } })
-  if (anyUser === 0) {
-    await db.category.updateMany({ where: { userId: null }, data: { userId } })
-    await db.expense.updateMany({ where: { userId: null }, data: { userId } })
-  }
+  // A freshly signed-in page fires several API calls at once, often on
+  // different function instances. Take a transaction-scoped advisory lock so
+  // exactly one of them performs setup; the others wait, then see it done.
+  await db.$transaction(
+    async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(${SETUP_LOCK_KEY})`
+      if (await tx.userSettings.findUnique({ where: { userId } })) return
 
-  const catCount = await db.category.count({ where: { userId } })
-  if (catCount === 0) {
-    await db.category.createMany({
-      data: DEFAULT_CATEGORIES.map((c) => ({
-        userId,
-        name: c.name,
-        icon: c.icon,
-        color: c.color,
-        budgetCents: c.budget == null ? null : toCents(c.budget),
-        isDefault: true,
-      })),
-    })
-    // Demo expenses are seeded only on first-time setup, so clearing them
-    // sticks (instead of re-seeding whenever the expense table is empty).
-    await seedDemoExpenses(userId, todayISO)
-  }
+      // The very first user to sign in inherits data created before sign-in
+      // existed (rows with no owner), so nothing already stored is lost.
+      const anyUser = await tx.userSettings.count()
+      await tx.userSettings.create({ data: { userId } })
+      if (anyUser === 0) {
+        await tx.category.updateMany({ where: { userId: null }, data: { userId } })
+        await tx.expense.updateMany({ where: { userId: null }, data: { userId } })
+      }
+
+      const catCount = await tx.category.count({ where: { userId } })
+      if (catCount === 0) {
+        await tx.category.createMany({
+          data: DEFAULT_CATEGORIES.map((c) => ({
+            userId,
+            name: c.name,
+            icon: c.icon,
+            color: c.color,
+            budgetCents: c.budget == null ? null : toCents(c.budget),
+            isDefault: true,
+          })),
+        })
+        // Demo expenses are seeded only on first-time setup, so clearing them
+        // sticks (instead of re-seeding whenever the expense table is empty).
+        await seedDemoExpenses(userId, todayISO, tx)
+      }
+    },
+    { timeout: 30_000, maxWait: 30_000 },
+  )
 }
 
 /**
