@@ -1,17 +1,14 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { db } from '@/lib/db'
-import { ensureSeed } from '@/lib/seed'
+import { NextResponse } from 'next/server'
+import { db, fromCents } from '@/lib/db'
+import { withUser } from '@/lib/api'
 import type { MonthSummary } from '@/lib/types'
 
 function round2(n: number) {
   return Math.round(n * 100) / 100
 }
 
-export async function GET(req: NextRequest) {
-  try {
+export const GET = withUser('GET /api/reports/monthly', async (req, _ctx, { userId }) => {
     const sp = req.nextUrl.searchParams
-    const today = sp.get('today') || undefined
-    await ensureSeed(today)
     const months = Math.min(Math.max(Number(sp.get('months')) || 6, 1), 24)
     const endParam = sp.get('end')
     const endISO = endParam && /^\d{4}-\d{2}-\d{2}$/.test(endParam) ? endParam : undefined
@@ -38,15 +35,15 @@ export async function GET(req: NextRequest) {
 
     const rows = await db.expense.groupBy({
       by: ['date'],
-      where: { date: { gte: `${firstKey}-01`, lte: endDate } },
-      _sum: { amount: true },
+      where: { userId, date: { gte: `${firstKey}-01`, lte: endDate } },
+      _sum: { amountCents: true },
       _count: { _all: true },
     })
     const totals = new Map<string, { total: number; count: number }>()
     for (const r of rows) {
       const key = r.date.slice(0, 7)
       const cur = totals.get(key) || { total: 0, count: 0 }
-      cur.total += r._sum.amount || 0
+      cur.total += r._sum.amountCents || 0
       cur.count += r._count._all
       totals.set(key, cur)
     }
@@ -55,7 +52,7 @@ export async function GET(req: NextRequest) {
     let prevTotal = 0
     for (const key of keys) {
       const cur = totals.get(key)
-      const total = round2(cur?.total || 0)
+      const total = fromCents(cur?.total || 0)
       out.push({
         month: key,
         total,
@@ -65,8 +62,4 @@ export async function GET(req: NextRequest) {
       prevTotal = total
     }
     return NextResponse.json({ months: out })
-  } catch (err) {
-    console.error('GET /api/reports/monthly failed:', err)
-    return NextResponse.json({ error: 'Failed to load monthly summary' }, { status: 500 })
-  }
-}
+})

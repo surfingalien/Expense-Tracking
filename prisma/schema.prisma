@@ -1,40 +1,92 @@
 generator client {
-  provider = "prisma-client-js"
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "esm"
 }
 
 datasource db {
-  provider  = "postgresql"
-  // Neon on Vercel: pooled connection for the app, direct connection for migrations
-  url       = env("DATABASE_URL")
-  directUrl = env("DATABASE_URL_UNPOOLED")
+  provider = "postgresql"
+  // Connection URLs live in prisma.config.ts (CLI) and src/lib/db.ts (app).
+}
+
+// Money is stored as integer cents (minor units) to avoid floating-point
+// rounding. src/lib/db.ts exposes computed `amount` / `budget` fields in
+// major units so application code can keep reading dollars.
+
+model UserSettings {
+  userId    String   @id // Clerk user id
+  currency  String   @default("USD") // ISO 4217 code, display only
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model Category {
-  id        String    @id @default(cuid())
-  name      String    @unique
-  icon      String    @default("Tag")
-  color     String    @default("#10b981")
-  budget    Float?
-  isDefault Boolean   @default(false)
-  expenses  Expense[]
-  createdAt DateTime  @default(now())
+  id          String             @id @default(cuid())
+  userId      String? // null only for rows created before sign-in existed
+  name        String
+  icon        String             @default("Tag")
+  color       String             @default("#10b981")
+  budgetCents Int?
+  isDefault   Boolean            @default(false)
+  expenses    Expense[]
+  recurring   RecurringExpense[]
+  createdAt   DateTime           @default(now())
+
+  @@unique([userId, name])
+  @@index([userId])
 }
 
 model Expense {
-  id           String   @id @default(cuid())
-  amount       Float
+  id           String            @id @default(cuid())
+  userId       String?
+  amountCents  Int
   merchant     String
   date         String // YYYY-MM-DD in the user's local calendar
   description  String?
   items        String? // JSON string: [{ name, price, qty? }]
-  receiptImage String? // compressed data URL of the scanned receipt
-  source       String   @default("manual") // manual | scan | demo
-  isDemo       Boolean  @default(false)
+  receiptImage String? // Blob pathname (private store) or legacy data URL
+  source       String            @default("manual") // manual | scan | demo | recurring | import
+  isDemo       Boolean           @default(false)
   categoryId   String
-  category     Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  category     Category          @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  recurringId  String?
+  recurring    RecurringExpense? @relation(fields: [recurringId], references: [id], onDelete: SetNull)
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
 
   @@index([date])
   @@index([categoryId])
+  @@index([userId, date])
+}
+
+model Income {
+  id          String   @id @default(cuid())
+  userId      String
+  amountCents Int
+  source      String // e.g. "Salary", "Freelance"
+  date        String // YYYY-MM-DD
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId, date])
+}
+
+model RecurringExpense {
+  id          String    @id @default(cuid())
+  userId      String
+  amountCents Int
+  merchant    String
+  description String?
+  categoryId  String
+  category    Category  @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  frequency   String // weekly | monthly | yearly
+  startDate   String // YYYY-MM-DD, first occurrence
+  nextDate    String // YYYY-MM-DD, next occurrence not yet created
+  active      Boolean   @default(true)
+  expenses    Expense[]
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([userId])
 }

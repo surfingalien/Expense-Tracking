@@ -1,159 +1,81 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { db } from '@/lib/db'
-import { ensureSeed } from '@/lib/seed'
+import { NextResponse } from 'next/server'
+import { db, fromCents } from '@/lib/db'
+import { ISO_DATE, jsonError, withUser } from '@/lib/api'
 import { budgetStatusFor } from '@/lib/budget-status'
-import type { ExpenseItem } from '@/lib/types'
+import { toExpenseDTO } from '@/lib/dto'
+import { isOwnReceiptPath } from '@/lib/receipts'
+import type { Prisma } from '@/generated/prisma/client'
+import { parseItems, validateExpenseBody } from '@/lib/expense-input'
 
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
-const MAX_RECEIPT_LENGTH = 2_500_000 // ~2.5MB data URL
+const DEFAULT_PAGE = 50
+const MAX_PAGE = 500
 
-function badRequest(message: string) {
-  return NextResponse.json({ error: message }, { status: 400 })
-}
+export const GET = withUser('GET /api/expenses', async (req, _ctx, { userId }) => {
+  const sp = req.nextUrl.searchParams
+  const start = sp.get('start')
+  const end = sp.get('end')
+  const categoryId = sp.get('categoryId') || undefined
+  const q = (sp.get('q') || '').trim()
+  const sort = sp.get('sort') || 'date_desc'
+  const limit = Math.min(Math.max(Number(sp.get('limit')) || DEFAULT_PAGE, 1), MAX_PAGE)
+  const offset = Math.max(Number(sp.get('offset')) || 0, 0)
 
-export async function GET(req: NextRequest) {
-  try {
-    const sp = req.nextUrl.searchParams
-    const today = sp.get('today') || undefined
-    await ensureSeed(today)
-
-    const start = sp.get('start')
-    const end = sp.get('end')
-    const categoryId = sp.get('categoryId') || undefined
-    const q = (sp.get('q') || '').trim().toLowerCase()
-    const sort = sp.get('sort') || 'date_desc'
-    const limit = Math.min(Number(sp.get('limit')) || 1000, 2000)
-
-    const where: Record<string, unknown> = {}
-    if (start && ISO_DATE.test(start) && end && ISO_DATE.test(end)) {
-      where.date = { gte: start, lte: end }
-    } else if (start && ISO_DATE.test(start)) {
-      where.date = { gte: start }
-    } else if (end && ISO_DATE.test(end)) {
-      where.date = { lte: end }
-    }
-    if (categoryId && categoryId !== 'all') where.categoryId = categoryId
-
-    const rows = await db.expense.findMany({
-      where,
-      include: { category: true },
-      orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
-      take: limit,
-    })
-
-    let expenses = rows
-    if (q) {
-      expenses = rows.filter(
-        (e) =>
-          e.merchant.toLowerCase().includes(q) ||
-          (e.description || '').toLowerCase().includes(q) ||
-          e.category.name.toLowerCase().includes(q),
-      )
-    }
-
-    switch (sort) {
-      case 'date_asc':
-        expenses = [...expenses].sort(
-          (a, b) => a.date.localeCompare(b.date) || String(a.createdAt).localeCompare(String(b.createdAt)),
-        )
-        break
-      case 'amount_desc':
-        expenses = [...expenses].sort((a, b) => b.amount - a.amount)
-        break
-      case 'amount_asc':
-        expenses = [...expenses].sort((a, b) => a.amount - b.amount)
-        break
-      default:
-        break
-    }
-
-    const total = expenses.reduce((s, e) => s + e.amount, 0)
-    return NextResponse.json({
-      expenses,
-      summary: { count: expenses.length, total: Math.round(total * 100) / 100 },
-    })
-  } catch (err) {
-    console.error('GET /api/expenses failed:', err)
-    return NextResponse.json({ error: 'Failed to load expenses' }, { status: 500 })
+  const where: Prisma.ExpenseWhereInput = { userId }
+  const date: Prisma.StringFilter = {}
+  if (start && ISO_DATE.test(start)) date.gte = start
+  if (end && ISO_DATE.test(end)) date.lte = end
+  if (date.gte || date.lte) where.date = date
+  if (categoryId && categoryId !== 'all') where.categoryId = categoryId
+  if (q) {
+    where.OR = [
+      { merchant: { contains: q, mode: 'insensitive' } },
+      { description: { contains: q, mode: 'insensitive' } },
+      { category: { name: { contains: q, mode: 'insensitive' } } },
+    ]
   }
-}
 
-function parseItems(raw: unknown): string | null {
-  if (!Array.isArray(raw) || raw.length === 0) return null
-  const items: ExpenseItem[] = []
-  for (const it of raw) {
-    if (!it || typeof it !== 'object') continue
-    const obj = it as Record<string, unknown>
-    const name = typeof obj.name === 'string' ? obj.name.slice(0, 120) : ''
-    const price = Number(obj.price)
-    if (!name || !Number.isFinite(price)) continue
-    const qty = Number(obj.qty)
-    items.push({
-      name,
-      price: Math.round(price * 100) / 100,
-      qty: Number.isFinite(qty) && qty > 0 ? Math.round(qty) : null,
-    })
-  }
-  return items.length ? JSON.stringify(items.slice(0, 50)) : null
-}
+  const orderBy: Prisma.ExpenseOrderByWithRelationInput[] =
+    sort === 'date_asc'
+      ? [{ date: 'asc' }, { createdAt: 'asc' }]
+      : sort === 'amount_desc'
+        ? [{ amountCents: 'desc' }, { date: 'desc' }]
+        : sort === 'amount_asc'
+          ? [{ amountCents: 'asc' }, { date: 'desc' }]
+          : [{ date: 'desc' }, { createdAt: 'desc' }]
 
-async function validateBody(body: Record<string, unknown>) {
-  const amount = Number(body.amount)
-  const merchant = typeof body.merchant === 'string' ? body.merchant.trim().slice(0, 120) : ''
-  const date = typeof body.date === 'string' ? body.date.trim() : ''
-  const categoryId = typeof body.categoryId === 'string' ? body.categoryId : ''
-  const description =
-    typeof body.description === 'string' ? body.description.trim().slice(0, 300) || null : null
-  const receiptImage =
-    typeof body.receiptImage === 'string' &&
-    body.receiptImage.length > 0 &&
-    body.receiptImage.length <= MAX_RECEIPT_LENGTH
-      ? body.receiptImage
-      : null
-  const source = body.source === 'scan' ? 'scan' : body.source === 'demo' ? 'demo' : 'manual'
+  const [rows, agg] = await Promise.all([
+    db.expense.findMany({ where, include: { category: true }, orderBy, skip: offset, take: limit }),
+    db.expense.aggregate({ where, _count: { _all: true }, _sum: { amountCents: true } }),
+  ])
+  const count = agg._count._all
+  return NextResponse.json({
+    expenses: rows.map(toExpenseDTO),
+    summary: { count, total: fromCents(agg._sum.amountCents || 0) },
+    hasMore: offset + rows.length < count,
+    nextOffset: offset + rows.length,
+  })
+})
 
-  if (!Number.isFinite(amount) || amount <= 0) return { error: 'Amount must be a positive number' }
-  if (!merchant) return { error: 'Merchant is required' }
-  if (!ISO_DATE.test(date)) return { error: 'Date must be in YYYY-MM-DD format' }
-  if (!categoryId) return { error: 'Category is required' }
-  const category = await db.category.findUnique({ where: { id: categoryId } })
-  if (!category) return { error: 'Category not found' }
-
-  return {
-    amount,
-    merchant,
-    date,
-    categoryId,
-    description,
-    receiptImage,
-    source,
-    items: parseItems(body.items),
-  }
-}
-
-export async function POST(req: NextRequest) {
-  try {
-    const body = (await req.json()) as Record<string, unknown>
-    const v = await validateBody(body)
-    if ('error' in v && v.error) return badRequest(v.error)
-    const data = v as Exclude<typeof v, { error: string }>
-    const expense = await db.expense.create({
-      data: {
-        amount: data.amount,
-        merchant: data.merchant,
-        date: data.date,
-        description: data.description,
-        items: data.items,
-        receiptImage: data.receiptImage,
-        source: data.source,
-        categoryId: data.categoryId,
-      },
-      include: { category: true },
-    })
-    const budgetStatus = await budgetStatusFor(expense.categoryId, expense.date)
-    return NextResponse.json({ expense, budgetStatus }, { status: 201 })
-  } catch (err) {
-    console.error('POST /api/expenses failed:', err)
-    return NextResponse.json({ error: 'Failed to create expense' }, { status: 500 })
-  }
-}
+export const POST = withUser('POST /api/expenses', async (req, _ctx, { userId }) => {
+  const body = (await req.json()) as Record<string, unknown>
+  const v = await validateExpenseBody(userId, body)
+  if ('error' in v) return jsonError(v.error)
+  const source = body.source === 'scan' ? 'scan' : 'manual'
+  const expense = await db.expense.create({
+    data: {
+      userId,
+      amountCents: v.amountCents,
+      merchant: v.merchant,
+      date: v.date,
+      description: v.description,
+      categoryId: v.categoryId,
+      items: parseItems(body.items),
+      // Only accept a receipt the scan endpoint stored for this same user.
+      receiptImage: isOwnReceiptPath(userId, body.receiptImage) ? body.receiptImage : null,
+      source,
+    },
+    include: { category: true },
+  })
+  const budgetStatus = await budgetStatusFor(userId, expense.categoryId, expense.date)
+  return NextResponse.json({ expense: toExpenseDTO(expense), budgetStatus }, { status: 201 })
+})

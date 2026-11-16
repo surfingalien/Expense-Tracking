@@ -25,6 +25,7 @@ export interface ReportExpenseRow {
 
 export interface ReportData {
   periodLabel: string
+  currency: string // ISO 4217
   start: string
   end: string
   total: number
@@ -53,9 +54,35 @@ function sanitize(input: string): string {
     .replace(/[^\u0000-\u00FF]/g, '?')
 }
 
+// The standard PDF fonts only cover Latin-1, so only a few currency symbols
+// can be drawn; other currencies are shown with their ISO code instead
+// (e.g. "1,234.56 INR").
+const PDF_SAFE_SYMBOLS = new Set(['$', '£', '¥'])
+let pdfCurrency = 'USD'
+
+function currencySymbol(): string | null {
+  try {
+    const sym =
+      new Intl.NumberFormat('en-US', { style: 'currency', currency: pdfCurrency })
+        .formatToParts(0)
+        .find((p) => p.type === 'currency')?.value ?? ''
+    return PDF_SAFE_SYMBOLS.has(sym) ? sym : null
+  } catch {
+    return null
+  }
+}
+
 function money(n: number): string {
   const sign = n < 0 ? '-' : ''
-  return `${sign}$${Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  const num = Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  const sym = currencySymbol()
+  return sym ? `${sign}${sym}${num}` : `${sign}${num} ${pdfCurrency}`
+}
+
+function moneyCompact(n: number): string {
+  const sym = currencySymbol()
+  const k = `${Math.round(n / 1000)}k`
+  return sym ? `${sym}${k}` : k
 }
 
 function hexRGB(hex: string) {
@@ -160,7 +187,7 @@ function drawTrendChart(ctx: Ctx, buckets: TrendBucket[]) {
     const gy = bottom + (chartH * i) / 3
     ctx.page.drawLine({ start: { x: MARGIN + 34, y: gy }, end: { x: MARGIN + CONTENT_W, y: gy }, thickness: 0.5, color: LINE })
     const label = money(Math.round((niceMax * i) / 3))
-    ctx.page.drawText(label.length > 7 ? `$${Math.round((niceMax * i) / 3 / 1000)}k` : label, {
+    ctx.page.drawText(label.length > 7 ? moneyCompact((niceMax * i) / 3) : label, {
       x: MARGIN,
       y: gy - 3,
       size: 7,
@@ -249,6 +276,7 @@ function drawKPIBox(
 
 export async function buildExpenseReportPDF(data: ReportData): Promise<Uint8Array> {
   const doc = await PDFDocument.create()
+  pdfCurrency = data.currency || 'USD'
   doc.setTitle(`Expense Report ${data.periodLabel}`)
   doc.setProducer('Expense Tracker')
   const font = await doc.embedFont(StandardFonts.Helvetica)

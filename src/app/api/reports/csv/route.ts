@@ -1,8 +1,5 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { db } from '@/lib/db'
-import { ensureSeed } from '@/lib/seed'
-
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+import { db, fromCents } from '@/lib/db'
+import { ISO_DATE, jsonError, withUser } from '@/lib/api'
 
 function csvEscape(value: string): string {
   if (/[",\n\r]/.test(value)) return `"${value.replace(/"/g, '""')}"`
@@ -13,17 +10,23 @@ function money(n: number): string {
   return n.toFixed(2)
 }
 
-export async function GET(req: NextRequest) {
-  try {
+const SOURCE_LABEL: Record<string, string> = {
+  scan: 'Scanned receipt',
+  demo: 'Demo',
+  recurring: 'Recurring',
+  import: 'Imported',
+}
+
+export const GET = withUser('GET /api/reports/csv', async (req, _ctx, { userId }) => {
     const sp = req.nextUrl.searchParams
     const start = sp.get('start') || ''
     const end = sp.get('end') || ''
     if (!ISO_DATE.test(start) || !ISO_DATE.test(end)) {
-      return NextResponse.json({ error: 'start and end (YYYY-MM-DD) are required' }, { status: 400 })
+      return jsonError('start and end (YYYY-MM-DD) are required')
     }
 
     const expenses = await db.expense.findMany({
-      where: { date: { gte: start, lte: end } },
+      where: { userId, date: { gte: start, lte: end } },
       include: { category: true },
       orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
     })
@@ -37,14 +40,14 @@ export async function GET(req: NextRequest) {
           e.category.name,
           e.description || '',
           money(e.amount),
-          e.source === 'scan' ? 'Scanned receipt' : e.source === 'demo' ? 'Demo' : 'Manual entry',
+          SOURCE_LABEL[e.source] || 'Manual entry',
         ]
           .map(csvEscape)
           .join(','),
       ),
     ]
 
-    const total = expenses.reduce((s, e) => s + e.amount, 0)
+    const total = fromCents(expenses.reduce((s, e) => s + e.amountCents, 0))
     lines.push('')
     lines.push(`,,,,${money(total)},TOTAL`)
 
@@ -56,8 +59,4 @@ export async function GET(req: NextRequest) {
         'Cache-Control': 'no-store',
       },
     })
-  } catch (err) {
-    console.error('GET /api/reports/csv failed:', err)
-    return NextResponse.json({ error: 'Failed to generate CSV report' }, { status: 500 })
-  }
-}
+})

@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { CalendarDays, Coins, Landmark, ReceiptText, Sparkles, Wallet } from 'lucide-react'
+import { Banknote, CalendarDays, Coins, Landmark, PiggyBank, ReceiptText, Sparkles, Wallet } from 'lucide-react'
 import { Progress } from '@/components/ui/progress'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Button } from '@/components/ui/button'
@@ -106,7 +106,7 @@ export function DashboardView({ onGoToExpenses }: { onGoToExpenses: () => void }
       <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
         <StatCard
           label="Total Spent"
-          value={summary ? formatCurrency(summary.total) : '$0.00'}
+          value={summary ? formatCurrency(summary.total) : formatCurrency(0)}
           icon={Wallet}
           loading={isLoading}
           deltaPct={summary?.deltaPct ?? null}
@@ -123,7 +123,7 @@ export function DashboardView({ onGoToExpenses }: { onGoToExpenses: () => void }
         />
         <StatCard
           label="Avg / Day"
-          value={summary ? formatCurrency(summary.avgPerDay) : '$0.00'}
+          value={summary ? formatCurrency(summary.avgPerDay) : formatCurrency(0)}
           icon={CalendarDays}
           loading={isLoading}
           iconBg="bg-teal-50 text-teal-600"
@@ -138,6 +138,25 @@ export function DashboardView({ onGoToExpenses }: { onGoToExpenses: () => void }
           sub={summary?.topCategory ? formatCurrency(summary.topCategory.total) : 'no spending yet'}
         />
       </div>
+
+      {summary && summary.income > 0 && (
+        <div className="grid grid-cols-2 gap-4">
+          <StatCard
+            label="Income"
+            value={formatCurrency(summary.income)}
+            icon={Banknote}
+            iconBg="bg-sky-50 text-sky-600"
+            sub={periodSubLabel(period)}
+          />
+          <StatCard
+            label={summary.net >= 0 ? 'Net Savings' : 'Overspent'}
+            value={formatCurrency(Math.abs(summary.net))}
+            icon={PiggyBank}
+            iconBg={summary.net >= 0 ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-500'}
+            sub={`${Math.round((summary.net / summary.income) * 100)}% of income`}
+          />
+        </div>
+      )}
 
       <div className="grid gap-4 lg:grid-cols-3">
         <SectionCard title="Spending Trend" className="lg:col-span-2" action={<span className="text-xs text-gray-400">{PERIODS.find((p) => p.key === period)?.label}</span>}>

@@ -1,99 +1,83 @@
 # AI Expense Tracker
 
-A modern expense-tracking web app with AI receipt scanning, automatic per-item categorization, budgets, an analytics dashboard, and PDF/CSV report export. Single-user, no login required.
+An expense-tracking web app with sign-in, AI receipt scanning, budgets and budget alerts, recurring expenses, income tracking, CSV import, an analytics dashboard, and PDF/CSV reports. Runs on Vercel with Neon Postgres, Clerk, Vercel Blob and the Vercel AI Gateway.
 
-![stack](https://img.shields.io/badge/Next.js%2016-React%2019-10b981) ![db](https://img.shields.io/badge/Prisma-Postgres-2D3748) ![style](https://img.shields.io/badge/Tailwind%204-shadcn%2Fui-emerald)
+![stack](https://img.shields.io/badge/Next.js%2016-React%2019-10b981) ![db](https://img.shields.io/badge/Prisma%207-Postgres-2D3748) ![style](https://img.shields.io/badge/Tailwind%204-shadcn%2Fui-emerald)
 
 ## Features
 
-- **AI receipt scanning** — upload or drag a receipt photo; GLM-4.6V (via `z-ai-web-dev-sdk`) extracts the merchant, date, line items, tax and total. You review the extracted data in a confirmation form before anything is saved.
-- **Automatic categorization** — keyword rules + AI suggestions assign each expense to one of 10 default categories (Food & Dining, Groceries, Shopping, Transportation, …). The scan form also captures individual line items.
-- **Dashboard** — KPI stat cards, daily/monthly spending trend chart, category donut chart, budget progress bars, top-merchants ranking, recent transactions. Period switcher: Today / Week / Month / 30D / Year with previous-period comparison.
-- **Budgets** — set a monthly budget per category with inline editing, progress bars, "Over" badges and toast warnings at ≥80% and >100% usage.
-- **Reports** — multi-page vector PDF report (KPIs, category breakdown, budget performance, trend chart, monthly summary, transaction list) and CSV export.
-- **Demo data** — 90 days of realistic seeded transactions (subscriptions, random daily spending, monthly trips) so every view is populated on first launch.
+- **Accounts** — sign in with Clerk; every user only sees their own data.
+- **AI receipt scanning** — a photo is read by a vision model (default `google/gemini-3.5-flash` via the Vercel AI Gateway), which extracts merchant, date, line items, tax and total. You confirm before saving. The receipt image is kept in a private Vercel Blob store and only served to its owner.
+- **Automatic categorization** — AI suggestion plus keyword rules map each expense to a category.
+- **Dashboard** — KPIs, trend chart, category donut, budget bars, top merchants, income and net savings, and an alert banner when a category passes 80% / 100% of its budget.
+- **Budgets & recurring expenses** — monthly limits per category; recurring rules (weekly / monthly / yearly) for rent, subscriptions and bills are logged automatically on their due dates.
+- **Income** — record salary and other income to see net savings for any period.
+- **CSV import** — import a bank export; columns are detected, deposits skipped and duplicates ignored.
+- **Reports** — multi-page PDF report and CSV export.
+- **Currency** — choose the display currency per user.
+- **Installable** — web app manifest and icons, so it can be added to a phone's home screen.
 
 ## Tech stack
 
-| Layer     | Choice                                                      |
-| --------- | ----------------------------------------------------------- |
-| Framework | Next.js 16 (App Router) + TypeScript                        |
-| UI        | Tailwind CSS 4 + shadcn/ui + Recharts + lucide-react + sonner |
-| Data      | TanStack Query (client) + Prisma 6 / Postgres (server)      |
-| Reports   | pdf-lib (vector PDF) + native CSV                            |
-| Images    | sharp (client-size compression before OCR)                   |
-| AI        | z-ai-web-dev-sdk → GLM-4.6V vision model                     |
+| Layer     | Choice                                                         |
+| --------- | -------------------------------------------------------------- |
+| Framework | Next.js 16 (App Router) + TypeScript (type-checked on build)   |
+| UI        | Tailwind CSS 4 + shadcn/ui + Recharts + lucide-react + sonner  |
+| Auth      | Clerk (`@clerk/nextjs`)                                        |
+| Data      | TanStack Query (client) + Prisma 7 with `@prisma/adapter-pg`   |
+| Database  | Postgres (Neon via the Vercel Marketplace)                     |
+| Files     | Vercel Blob (private) for receipt images                       |
+| AI        | AI SDK + Vercel AI Gateway (vision model, structured output)   |
+| Reports   | pdf-lib (vector PDF) + native CSV                              |
+
+## Environment variables
+
+| Variable | Set by | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` / `DATABASE_URL_UNPOOLED` | Neon integration | pooled (app) / direct (migrations) Postgres URLs |
+| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` / `CLERK_SECRET_KEY` | Clerk integration | sign-in |
+| `BLOB_READ_WRITE_TOKEN` | Blob store connected to the project | receipt image storage (optional — scanning works without it, images just aren't kept) |
+| `AI_GATEWAY_API_KEY` | you, **local dev only** | on Vercel the AI Gateway authenticates with the project's OIDC token automatically |
+| `RECEIPT_SCAN_MODEL` | optional | override the vision model, e.g. `anthropic/claude-haiku-5.5` |
+| `DEV_AUTH_BYPASS_USER_ID` | optional, local dev only | run `next dev` without Clerk as this user id; ignored in production builds |
+
+On Vercel, pull them locally with `vercel env pull .env`.
 
 ## Getting started
 
-### 1. Install dependencies
-
 ```bash
-bun install        # or: npm install
+bun install           # also runs prisma generate
+bun run db:deploy     # apply migrations (prisma migrate deploy)
+bun run dev           # http://localhost:3000
 ```
 
-### 2. Configure the database
+The first time a user signs in they get the default categories and 90 days of demo expenses (clear them under **Reports → Data management**). The first user to sign in also takes ownership of any data created before sign-in existed.
 
-The app uses **Postgres** (Neon via the Vercel Marketplace in production). Set two variables in `.env`:
-
-```
-DATABASE_URL=postgresql://...            # pooled connection (used by the app)
-DATABASE_URL_UNPOOLED=postgresql://...   # direct connection (used by migrations)
-```
-
-On Vercel, connecting a Neon database to the project sets both automatically; pull them locally with `vercel env pull .env`. For a local Postgres, both can be the same URL.
-
-Apply the schema:
-
-```bash
-bun run db:deploy     # prisma migrate deploy
-```
-
-### 3. Run the app
-
-```bash
-bun run dev           # or: npm run dev  → http://localhost:3000
-```
-
-On first request the app seeds the 10 default categories and 90 days of demo expenses automatically. To clear or reload demo data use the **Demo data** control in the app (POST `/api/demo` with `{"action":"load"|"clear"}`).
-
-### 4. Enable AI receipt scanning (optional)
-
-Receipt scanning calls the `z-ai-web-dev-sdk` (GLM-4.6V). Credentials are read from the SDK's standard configuration. Without valid credentials everything else still works — manual entry, budgets, analytics and reports — and the scan dialog will show an error toast.
-
-### 5. Build for production
-
-```bash
-bun run build && bun run start
-```
+`bun run build` generates the Prisma client, applies pending migrations, then builds (with type checking). Run `bun run lint` before shipping changes.
 
 ## Project structure
 
 ```
-prisma/schema.prisma            # Category + Expense models
+prisma/schema.prisma            # UserSettings, Category, Expense, Income, RecurringExpense
 prisma/migrations/              # Postgres migrations (applied on every build)
+prisma.config.ts                # Prisma 7 CLI config (migration connection URL)
+src/proxy.ts                    # Clerk middleware
 src/lib/
-  db.ts                         # Prisma client singleton
-  seed.ts                       # deterministic 90-day demo data + ensureSeed()
-  categories.ts                 # default categories, keyword → category rules
-  period.ts                     # timezone-safe date math, trend bucketing
-  budget-status.ts              # monthly budget computation
-  pdf-report.ts                 # pdf-lib multi-page report renderer
-  types.ts / format.ts / utils.ts
+  db.ts                         # Prisma client; money stored as integer cents, exposed as `amount`
+  auth.ts / api.ts              # session lookup + withUser() wrapper for API routes
+  seed.ts                       # per-user setup, default categories, demo data
+  recurring.ts                  # recurring-expense scheduling (materialized on load)
+  receipts.ts                   # private Blob storage for receipt images
+  csv.ts                        # CSV / date / money parsing for imports
+  categories.ts / period.ts / budget-status.ts / pdf-report.ts / format.ts / types.ts
 src/app/api/
-  expenses/ (+ [id])            # CRUD, returns budget status after mutations
-  categories/ (+ [id])          # CRUD incl. budget
-  analytics/                    # trend, category %, merchants, budgets, monthly
-  scan/                         # sharp → GLM-4.6V → validated JSON
+  expenses/ (+ [id], [id]/receipt)  categories/ (+ [id])  income/ (+ [id])
+  recurring/ (+ [id])  import/  settings/  analytics/  scan/  demo/
   reports/pdf | reports/csv | reports/monthly
-  demo/                         # load / clear demo dataset
-src/components/expense-tracker/ # all app views (dashboard, expenses, budgets, reports, scan)
-src/components/ui/              # shadcn/ui primitives
-scripts/make_receipt.py         # generates a test receipt image for trying the scanner
+src/components/expense-tracker/ # app views and dialogs
 ```
 
 ## Notes
 
-- Amounts are USD. Dates are stored as plain `YYYY-MM-DD` strings in the user's local calendar; all period math is UTC-based string math, so it is timezone-safe.
-- Receipt images are compressed client-side before upload and stored as data URLs on the expense record.
-- `next dev` does not type-check; use `bunx tsc --noEmit` and `bun run lint` before shipping changes.
+- Money is stored as integer cents to avoid floating-point rounding; the currency setting changes display only (no conversion).
+- Dates are plain `YYYY-MM-DD` strings in the user's local calendar; period math is timezone-safe string math.

@@ -23,6 +23,8 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
+import { ImportCard } from './import-card'
+import { SettingsCard } from './settings-card'
 import { useCategories, useDemoMutation, useDemoStatus, useExpenses, useMonthlySummary } from './hooks'
 import { SectionCard } from './ui-bits'
 import { formatCurrency } from '@/lib/format'
@@ -63,7 +65,7 @@ export function ReportsView() {
   const monthly = useMonthlySummary(6, range.end)
 
   // summary for the selected period (cached by react-query)
-  const summaryQuery = useExpenses({ start: range.start, end: range.end, limit: 2000 }, true)
+  const summaryQuery = useExpenses({ start: range.start, end: range.end, limit: 1 }, true)
 
   const summary = summaryQuery.data?.summary
   const categories = catData?.categories ?? []
@@ -196,6 +198,10 @@ export function ReportsView() {
           </div>
         )}
       </SectionCard>
+
+      <ImportCard />
+
+      <SettingsCard />
 
       <SectionCard title="Data management" action={<Database className="h-4 w-4 text-gray-300" />}>
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-gray-500">

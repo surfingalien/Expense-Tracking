@@ -1,7 +1,9 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { ClerkProvider } from "@clerk/nextjs";
 import { Providers } from "./providers";
+import { devBypassUserId } from "@/lib/auth";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -18,8 +20,15 @@ export const metadata: Metadata = {
   description:
     "Track daily, weekly and monthly expenses. Scan receipts with AI, auto-categorize spending, set budgets and generate PDF/CSV reports.",
   keywords: ["expense tracker", "receipt scanner", "budget", "personal finance", "analytics"],
+  applicationName: "Expense Tracker",
   icons: {
-    icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
+    icon: "/icon.svg",
+    apple: "/icons/apple-touch-icon.png",
+  },
+  appleWebApp: {
+    capable: true,
+    title: "Expenses",
+    statusBarStyle: "default",
   },
 };
 
@@ -34,13 +43,15 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  return (
+  const authEnabled = !devBypassUserId;
+  const app = (
     <html lang="en" suppressHydrationWarning>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
       >
-        <Providers>{children}</Providers>
+        <Providers authEnabled={authEnabled}>{children}</Providers>
       </body>
     </html>
   );
+  return authEnabled ? <ClerkProvider>{app}</ClerkProvider> : app;
 }

@@ -1,34 +1,35 @@
-import { NextRequest, NextResponse } from 'next/server'
-import ZAI from 'z-ai-web-dev-sdk'
+import { NextResponse } from 'next/server'
+import { generateText, Output } from 'ai'
 import sharp from 'sharp'
+import { z } from 'zod'
 import { db } from '@/lib/db'
-import { ensureSeed } from '@/lib/seed'
+import { jsonError, withUser } from '@/lib/api'
 import { matchCategory } from '@/lib/categories'
 import { toISODate } from '@/lib/period'
+import { blobConfigured, storeReceipt } from '@/lib/receipts'
 import type { ExpenseItem, ScanResult } from '@/lib/types'
 
 export const maxDuration = 60
 
-const DATA_URL_RE = /^data:image\/(png|jpe?g|webp|gif|bmp);base64,(.+)$/
+// Vision model routed through the Vercel AI Gateway. On Vercel the gateway
+// authenticates with the project's OIDC token automatically; locally set
+// AI_GATEWAY_API_KEY (or run `vercel env pull`).
+const SCAN_MODEL = process.env.RECEIPT_SCAN_MODEL || 'google/gemini-3.5-flash'
+
+const DATA_URL_RE = /^data:image\/(png|jpe?g|webp|gif|bmp|heic|heif);base64,(.+)$/
 const MAX_UPLOAD = 10 * 1024 * 1024 // 10MB
 
-function todayISO(): string {
-  return toISODate(new Date())
-}
-
-function extractJSON(text: string): Record<string, unknown> | null {
-  let t = text.trim()
-  // strip markdown code fences if the model added them
-  t = t.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '')
-  const first = t.indexOf('{')
-  const last = t.lastIndexOf('}')
-  if (first === -1 || last === -1 || last <= first) return null
-  try {
-    return JSON.parse(t.slice(first, last + 1)) as Record<string, unknown>
-  } catch {
-    return null
-  }
-}
+const receiptSchema = z.object({
+  merchant: z.string().describe('Store or business name printed on the receipt'),
+  date: z.string().nullable().describe('Receipt date as YYYY-MM-DD, or null if unreadable'),
+  total: z.number().nullable().describe('Final grand total paid, after tax, tips and discounts'),
+  tax: z.number().nullable().describe('Sales tax amount if shown'),
+  items: z
+    .array(z.object({ name: z.string(), price: z.number(), qty: z.number().nullable() }))
+    .describe('Line items with prices, at most 30'),
+  category: z.string().describe('Best-fit spending category from the provided list'),
+  confidence: z.enum(['high', 'medium', 'low']),
+})
 
 const MONTHS: Record<string, number> = {
   jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
@@ -68,131 +69,110 @@ function parseReceiptDate(raw: unknown, today: string): string | null {
   return null
 }
 
-function parseAmount(raw: unknown): number | null {
-  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) return Math.round(raw * 100) / 100
-  if (typeof raw === 'string') {
-    const cleaned = raw.replace(/[^0-9.,-]/g, '').replace(/,(?=\d{3}\b)/g, '')
-    const n = Number(cleaned.replace(',', '.'))
-    if (Number.isFinite(n) && n >= 0) return Math.round(n * 100) / 100
-  }
-  return null
+function round2(n: number) {
+  return Math.round(n * 100) / 100
 }
 
-function parseItems(raw: unknown): ExpenseItem[] {
-  if (!Array.isArray(raw)) return []
-  const items: ExpenseItem[] = []
-  for (const it of raw) {
-    if (!it || typeof it !== 'object') continue
-    const obj = it as Record<string, unknown>
-    const name = typeof obj.name === 'string' ? obj.name.trim().slice(0, 120) : ''
-    const price = parseAmount(obj.price)
-    if (!name || price == null) continue
-    const qtyRaw = Number(obj.qty)
-    const qty = Number.isFinite(qtyRaw) && qtyRaw > 0 ? Math.round(qtyRaw) : null
-    items.push({ name, price, qty })
-  }
-  return items.slice(0, 30)
+function cleanItems(raw: z.infer<typeof receiptSchema>['items']): ExpenseItem[] {
+  return raw
+    .filter((i) => i.name.trim() && Number.isFinite(i.price) && i.price >= 0)
+    .slice(0, 30)
+    .map((i) => ({
+      name: i.name.trim().slice(0, 120),
+      price: round2(i.price),
+      qty: i.qty != null && i.qty > 0 ? Math.round(i.qty) : null,
+    }))
 }
 
-export async function POST(req: NextRequest) {
+export const POST = withUser('POST /api/scan', async (req, _ctx, { userId }) => {
+  const body = (await req.json()) as { image?: unknown; today?: unknown }
+  if (typeof body.image !== 'string') return jsonError('No receipt image provided')
+  const match = body.image.match(DATA_URL_RE)
+  if (!match) return jsonError('Unsupported image format. Use PNG, JPEG, WebP, GIF or BMP.')
+  if (body.image.length > MAX_UPLOAD) return jsonError('Image is too large (max 10MB)', 413)
+
+  const today =
+    typeof body.today === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.today) ? body.today : toISODate(new Date())
+
+  // Normalize to a reasonably sized JPEG: used both for the model and storage.
+  let jpeg: Buffer
   try {
-    await ensureSeed()
-    const body = (await req.json()) as { image?: unknown }
-    if (typeof body.image !== 'string') {
-      return NextResponse.json({ error: 'No receipt image provided' }, { status: 400 })
-    }
-    const match = body.image.match(DATA_URL_RE)
-    if (!match) {
-      return NextResponse.json({ error: 'Unsupported image format. Use PNG, JPEG, WebP, GIF or BMP.' }, { status: 400 })
-    }
-    if (body.image.length > MAX_UPLOAD) {
-      return NextResponse.json({ error: 'Image is too large (max 10MB)' }, { status: 413 })
-    }
+    jpeg = await sharp(Buffer.from(match[2], 'base64'))
+      .rotate()
+      .resize(1600, 2200, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 80 })
+      .toBuffer()
+  } catch {
+    return jsonError('Could not read this image. Try a different photo.')
+  }
 
-    const imageBuffer = Buffer.from(match[2], 'base64')
-    const today = todayISO()
+  const categories = await db.category.findMany({
+    where: { userId },
+    orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+  })
 
-    // Downscale + compress for storage (receipt preview thumbnail)
-    let thumbnail: string | null = null
-    try {
-      const small = await sharp(imageBuffer)
-        .resize(1100, 1500, { fit: 'inside', withoutEnlargement: true })
-        .jpeg({ quality: 78 })
-        .toBuffer()
-      thumbnail = `data:image/jpeg;base64,${small.toString('base64')}`
-    } catch (e) {
-      console.warn('Receipt thumbnail generation failed, storing original if small enough:', e)
-      if (imageBuffer.length <= 1_200_000) thumbnail = body.image
-    }
-
-    const zai = await ZAI.create()
-    const categories = await db.category.findMany({ orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }] })
-    const categoryList = categories.map((c) => c.name).join(', ')
-
-    const prompt = `You are a receipt and invoice data extraction engine. Read the receipt image and extract structured data. Respond with ONLY a valid JSON object — no markdown fences, no commentary — using exactly this schema:
-{"merchant": string, "date": string | null, "total": number | null, "tax": number | null, "items": [{"name": string, "price": number, "qty": number | null}], "category": string, "confidence": "high" | "medium" | "low"}
-
-Rules:
-- merchant: the store or business name on the receipt.
-- date: the receipt date formatted as YYYY-MM-DD. If only partially readable, fill in what you can; if unreadable, use null.
-- total: the final grand total paid (after tax, tips and discounts). If unreadable, null.
-- tax: the sales tax amount if shown, otherwise null.
-- items: line items with their prices; qty null if not shown. Maximum 30 items.
-- category: the single best-fit spending category for this purchase, chosen from this list: ${categoryList}.
-- confidence: how confident you are in the extraction.`
-
-    const response = await zai.chat.completions.createVision({
-      model: 'glm-4.6v',
+  let parsed: z.infer<typeof receiptSchema>
+  try {
+    const { output } = await generateText({
+      model: SCAN_MODEL,
+      output: Output.object({ schema: receiptSchema }),
       messages: [
         {
           role: 'user',
           content: [
-            { type: 'text', text: prompt },
-            { type: 'image_url', image_url: { url: body.image } },
+            {
+              type: 'text',
+              text: `Extract the data from this receipt or invoice. Choose "category" from: ${categories
+                .map((c) => c.name)
+                .join(', ')}. If something is unreadable use null.`,
+            },
+            { type: 'file', mediaType: 'image/jpeg', data: jpeg },
           ],
         },
       ],
-      thinking: { type: 'disabled' },
     })
-
-    const content = response.choices?.[0]?.message?.content
-    if (!content) {
-      return NextResponse.json({ error: 'The AI could not read this receipt. Try a clearer photo.' }, { status: 422 })
-    }
-    const parsed = extractJSON(content)
-    if (!parsed) {
-      return NextResponse.json({ error: 'Could not parse the receipt. Try a clearer photo.' }, { status: 422 })
-    }
-
-    const items = parseItems(parsed.items)
-    const merchant = typeof parsed.merchant === 'string' && parsed.merchant.trim() ? parsed.merchant.trim().slice(0, 120) : 'Unknown merchant'
-    const date = parseReceiptDate(parsed.date, today) || today
-    let total = parseAmount(parsed.total)
-    if (total == null && items.length) total = Math.round(items.reduce((s, i) => s + i.price, 0) * 100) / 100
-    const tax = parseAmount(parsed.tax)
-    const confidence = parsed.confidence === 'high' || parsed.confidence === 'low' ? parsed.confidence : 'medium'
-    const categoryId = matchCategory(
-      typeof parsed.category === 'string' ? parsed.category : null,
-      merchant,
-      items.map((i) => i.name),
-      categories.map((c) => ({ id: c.id, name: c.name })),
-    )
-    const categoryName = categories.find((c) => c.id === categoryId)?.name || 'Other'
-
-    const result: ScanResult = {
-      merchant,
-      date,
-      total,
-      tax,
-      items,
-      categoryId: categoryId || categories[0]?.id || '',
-      categoryName,
-      confidence,
-      thumbnail,
-    }
-    return NextResponse.json(result)
+    parsed = output
   } catch (err) {
-    console.error('POST /api/scan failed:', err)
-    return NextResponse.json({ error: 'Receipt scanning failed. Please try again or enter manually.' }, { status: 500 })
+    console.error('Receipt model call failed:', err)
+    return jsonError('The AI could not read this receipt. Try a clearer photo or enter it manually.', 422)
   }
-}
+
+  const items = cleanItems(parsed.items)
+  const merchant = parsed.merchant.trim().slice(0, 120) || 'Unknown merchant'
+  const date = parseReceiptDate(parsed.date, today) || today
+  let total = parsed.total != null && parsed.total >= 0 ? round2(parsed.total) : null
+  if (total == null && items.length) total = round2(items.reduce((s, i) => s + i.price * (i.qty || 1), 0))
+  const tax = parsed.tax != null && parsed.tax >= 0 ? round2(parsed.tax) : null
+  const categoryId = matchCategory(
+    parsed.category,
+    merchant,
+    items.map((i) => i.name),
+    categories.map((c) => ({ id: c.id, name: c.name })),
+  )
+  const categoryName = categories.find((c) => c.id === categoryId)?.name || 'Other'
+
+  // Keep the receipt in private Blob storage (skipped if no store is connected).
+  let receiptPath: string | null = null
+  if (blobConfigured()) {
+    try {
+      receiptPath = await storeReceipt(userId, jpeg)
+    } catch (err) {
+      console.error('Storing receipt image failed:', err)
+    }
+  }
+
+  const thumb = await sharp(jpeg).resize(500, 700, { fit: 'inside' }).jpeg({ quality: 70 }).toBuffer()
+  const result: ScanResult = {
+    merchant,
+    date,
+    total,
+    tax,
+    items,
+    categoryId: categoryId || categories[0]?.id || '',
+    categoryName,
+    confidence: parsed.confidence,
+    thumbnail: `data:image/jpeg;base64,${thumb.toString('base64')}`,
+    receiptPath,
+  }
+  return NextResponse.json(result)
+})

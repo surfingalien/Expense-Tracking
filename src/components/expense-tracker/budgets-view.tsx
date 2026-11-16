@@ -31,7 +31,8 @@ import { useCategories, useCreateCategory, useDeleteCategory, useUpdateCategory 
 import { SectionCard } from './ui-bits'
 import { CategoryIcon } from './category-icon'
 import { CATEGORY_PALETTE } from '@/lib/categories'
-import { formatCurrency } from '@/lib/format'
+import { currencySymbol, formatCurrency } from '@/lib/format'
+import { RecurringSection } from './recurring-section'
 import { formatMonthKey, toISODate } from '@/lib/period'
 import type { CategoryWithStats } from '@/lib/types'
 
@@ -108,14 +109,14 @@ function AddCategoryDialog({
           <div className="space-y-1.5">
             <Label htmlFor="cat-budget">Monthly budget (optional)</Label>
             <div className="relative">
-              <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-400">$</span>
+              <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-400">{currencySymbol()}</span>
               <Input
                 id="cat-budget"
                 type="number"
                 min="0"
                 step="10"
                 placeholder="e.g. 200"
-                className="pl-7"
+                className={currencySymbol().length > 1 ? 'pl-11' : 'pl-7'}
                 value={budget}
                 onChange={(e) => setBudget(e.target.value)}
               />
@@ -241,13 +242,13 @@ function BudgetRow({ category, month }: { category: CategoryWithStats; month: st
       </div>
       <div className="flex items-center gap-2 sm:w-52">
         <div className="relative flex-1">
-          <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-400">$</span>
+          <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-400">{currencySymbol()}</span>
           <Input
             type="number"
             min="0"
             step="10"
             placeholder="No limit"
-            className="pl-7"
+            className={currencySymbol().length > 1 ? 'pl-11' : 'pl-7'}
             value={budgetInput}
             aria-label={`${category.name} monthly budget`}
             onChange={(e) => {
@@ -342,6 +343,8 @@ export function BudgetsView() {
           ))}
         </div>
       )}
+
+      <RecurringSection categories={categories} />
 
       <AddCategoryDialog open={addOpen} onOpenChange={setAddOpen} />
     </div>
